@@ -37,6 +37,7 @@ class Card:
     sentence_zh: str
     extra_sentence: str = ""
     extra_sentence_zh: str = ""
+    word_forms: dict | None = None
 
 
 @dataclass
@@ -140,6 +141,10 @@ meaning_zh: 中文意思
 sentence_zh: 英文例句的中文翻译
 extra_sentence: 另一个自然英文例句，也必须包含原词或短语，不要和 sentence 重复
 extra_sentence_zh: extra_sentence 的中文翻译
+word_forms: 一个 JSON 对象，包含 adv、adj、n、related 四个字段。
+  adv/adj/n 各自是对象：{{"word": "词形", "meaning": "中文意思"}}；没有常见形式时 word 和 meaning 填空字符串。
+  related 是数组，最多 5 个对象，每个对象格式为 {{"word": "相关词", "meaning": "中文意思"}}。
+  例如输入 dark，related 可包含 darken(使变黑)、darker(更暗的)、darkness(黑暗) 等。
 
 要求：
 - 不要使用固定模板句。
@@ -180,6 +185,7 @@ extra_sentence_zh: extra_sentence 的中文翻译
                 sentence_zh=str(item.get("sentence_zh", "")).strip(),
                 extra_sentence=str(item.get("extra_sentence", "")).strip(),
                 extra_sentence_zh=str(item.get("extra_sentence_zh", "")).strip(),
+                word_forms=normalize_word_forms(item.get("word_forms", {})),
             )
         )
     return [card for card in cards if card.word and card.sentence]
@@ -200,6 +206,7 @@ def fallback_cards(words: list[tuple[str, str]], level: str) -> list[Card]:
                 sentence_zh="请根据例句补充中文翻译",
                 extra_sentence=make_extra_fallback_sentence(word),
                 extra_sentence_zh="请根据额外例句补充中文翻译",
+                word_forms=fallback_word_forms(word),
             )
         )
     return cards
@@ -222,6 +229,54 @@ def make_extra_fallback_sentence(word: str) -> str:
     if " " in clean:
         return f"My teacher asked me to {clean} in a short story."
     return f"Please remember how to use {clean} when you speak English."
+
+
+def normalize_form_item(item) -> dict[str, str]:
+    if isinstance(item, dict):
+        return {
+            "word": str(item.get("word", "")).strip(),
+            "meaning": str(item.get("meaning", "")).strip(),
+        }
+    return {"word": str(item or "").strip(), "meaning": ""}
+
+
+def normalize_word_forms(forms) -> dict:
+    if not isinstance(forms, dict):
+        forms = {}
+    related = forms.get("related", [])
+    if not isinstance(related, list):
+        related = []
+    return {
+        "adv": normalize_form_item(forms.get("adv", {})),
+        "adj": normalize_form_item(forms.get("adj", {})),
+        "n": normalize_form_item(forms.get("n", {})),
+        "related": [normalize_form_item(item) for item in related[:5]],
+    }
+
+
+def fallback_word_forms(word: str) -> dict:
+    clean = word.strip().split("/")[0].strip()
+    if not clean or " " in clean:
+        return {
+            "adv": {"word": "", "meaning": ""},
+            "adj": {"word": "", "meaning": ""},
+            "n": {"word": "", "meaning": ""},
+            "related": [],
+        }
+    return {
+        "adv": {"word": "", "meaning": ""},
+        "adj": {"word": "", "meaning": ""},
+        "n": {"word": clean, "meaning": "名词形式"},
+        "related": [],
+    }
+
+
+def format_form_item(item: dict[str, str]) -> str:
+    word = item.get("word", "").strip()
+    meaning = item.get("meaning", "").strip()
+    if not word:
+        return ""
+    return f"{word} ({meaning})" if meaning else word
 
 
 def make_cards(words: list[tuple[str, str]], level: str, config: AIConfig) -> list[Card]:
@@ -465,12 +520,193 @@ def speech_component(card: Card, index: int) -> None:
             window.speechSynthesis.cancel();
             window.speechSynthesis.resume();
             window.speechSynthesis.speak(utterance);
+            setTimeout(() => {{
+              if (!window.speechSynthesis.speaking && !window.speechSynthesis.pending) {{
+                window.speechSynthesis.speak(utterance);
+              }}
+            }}, 120);
           }}
 
           window.speechSynthesis.onvoiceschanged = pickEnglishVoice_{index};
         </script>
         """,
         height=115,
+    )
+
+
+def compact_speech_component(text: str, component_id: str, height: int = 46) -> None:
+    js_text = json.dumps(text)
+    safe_id = re.sub(r"[^a-zA-Z0-9_]", "_", component_id)
+    components.html(
+        f"""
+        <style>
+          .mini-speech-row {{
+            align-items: center;
+            display: flex;
+            gap: 8px;
+            min-height: 36px;
+          }}
+          .mini-speak-btn {{
+            border: 1px solid #d0d7de;
+            background: white;
+            border-radius: 999px;
+            cursor: pointer;
+            font-size: 16px;
+            height: 34px;
+            line-height: 1;
+            width: 34px;
+          }}
+          .mini-speak-btn:hover {{ background: #f6f8fa; }}
+          .mini-speech-error {{
+            color: #8a6d00;
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+          }}
+        </style>
+        <div class="mini-speech-row">
+          <button class="mini-speak-btn" title="播放发音" aria-label="播放发音" onclick='miniSpeak_{safe_id}({js_text})'>🔊</button>
+          <span id="mini-speech-error-{safe_id}" class="mini-speech-error"></span>
+        </div>
+        <script>
+          function miniPickEnglishVoice_{safe_id}() {{
+            const voices = window.speechSynthesis.getVoices();
+            return voices.find(v => v.lang === "en-US")
+              || voices.find(v => v.lang && v.lang.startsWith("en"))
+              || null;
+          }}
+
+          function miniSpeak_{safe_id}(text) {{
+            const errorBox = document.getElementById("mini-speech-error-{safe_id}");
+            errorBox.textContent = "";
+            if (!("speechSynthesis" in window)) {{
+              errorBox.textContent = "当前浏览器不支持朗读";
+              return;
+            }}
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = "en-US";
+            utterance.rate = 0.88;
+            utterance.pitch = 1;
+            utterance.volume = 1;
+            const voice = miniPickEnglishVoice_{safe_id}();
+            if (voice) {{
+              utterance.voice = voice;
+            }}
+            utterance.onerror = () => {{
+              errorBox.textContent = "朗读失败";
+            }};
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.resume();
+            window.speechSynthesis.speak(utterance);
+            setTimeout(() => {{
+              if (!window.speechSynthesis.speaking && !window.speechSynthesis.pending) {{
+                window.speechSynthesis.speak(utterance);
+              }}
+            }}, 120);
+          }}
+
+          window.speechSynthesis.onvoiceschanged = miniPickEnglishVoice_{safe_id};
+        </script>
+        """,
+        height=height,
+    )
+
+
+def word_forms_component(form_rows: list[tuple[str, str, str]], component_id: str) -> None:
+    safe_id = re.sub(r"[^a-zA-Z0-9_]", "_", component_id)
+    rows_html = []
+    words = []
+    for row_index, (label, word, meaning) in enumerate(form_rows):
+        words.append(word)
+        display = html.escape(f"{word} ({meaning})" if meaning else word)
+        rows_html.append(
+            f"""
+            <div class="form-row">
+              <button class="form-speak-btn" title="播放发音" aria-label="播放发音" onclick="formSpeak_{safe_id}({row_index})">🔊</button>
+              <span><b>{html.escape(label)}</b>: {display}</span>
+            </div>
+            """
+        )
+    js_words = json.dumps(words)
+    height = max(56, 42 * len(form_rows) + 12)
+    components.html(
+        f"""
+        <style>
+          .form-list {{
+            color: #1f2937;
+            font-family: Arial, sans-serif;
+            font-size: 17px;
+          }}
+          .form-row {{
+            align-items: center;
+            display: flex;
+            gap: 8px;
+            line-height: 1.7;
+            min-height: 38px;
+          }}
+          .form-speak-btn {{
+            border: 1px solid #d0d7de;
+            background: white;
+            border-radius: 999px;
+            cursor: pointer;
+            flex: 0 0 auto;
+            font-size: 14px;
+            height: 30px;
+            line-height: 1;
+            width: 30px;
+          }}
+          .form-speak-btn:hover {{ background: #f6f8fa; }}
+          .form-error {{
+            color: #8a6d00;
+            font-size: 12px;
+            margin-top: 4px;
+          }}
+        </style>
+        <div class="form-list">
+          {''.join(rows_html)}
+          <div id="form-error-{safe_id}" class="form-error"></div>
+        </div>
+        <script>
+          const formWords_{safe_id} = {js_words};
+
+          function formPickEnglishVoice_{safe_id}() {{
+            const voices = window.speechSynthesis.getVoices();
+            return voices.find(v => v.lang === "en-US")
+              || voices.find(v => v.lang && v.lang.startsWith("en"))
+              || null;
+          }}
+
+          function formSpeak_{safe_id}(index) {{
+            const errorBox = document.getElementById("form-error-{safe_id}");
+            errorBox.textContent = "";
+            if (!("speechSynthesis" in window)) {{
+              errorBox.textContent = "当前浏览器不支持朗读";
+              return;
+            }}
+            const utterance = new SpeechSynthesisUtterance(formWords_{safe_id}[index]);
+            utterance.lang = "en-US";
+            utterance.rate = 0.88;
+            utterance.volume = 1;
+            const voice = formPickEnglishVoice_{safe_id}();
+            if (voice) {{
+              utterance.voice = voice;
+            }}
+            utterance.onerror = () => {{
+              errorBox.textContent = "朗读失败";
+            }};
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.resume();
+            window.speechSynthesis.speak(utterance);
+            setTimeout(() => {{
+              if (!window.speechSynthesis.speaking && !window.speechSynthesis.pending) {{
+                window.speechSynthesis.speak(utterance);
+              }}
+            }}, 120);
+          }}
+
+          window.speechSynthesis.onvoiceschanged = formPickEnglishVoice_{safe_id};
+        </script>
+        """,
+        height=height,
     )
 
 
@@ -565,9 +801,22 @@ if cards:
                         f'<div style="font-size:18px;line-height:1.55;">{extra_markup}</div>',
                         unsafe_allow_html=True,
                     )
+                    compact_speech_component(extra_sentence, f"extra_{idx}")
                     extra_translation = getattr(card, "extra_sentence_zh", "")
                     if extra_translation:
                         st.markdown(
                             f'<div style="font-size:17px;margin-top:6px;">{html.escape(extra_translation)}</div>',
                             unsafe_allow_html=True,
                         )
+            word_forms = normalize_word_forms(getattr(card, "word_forms", {}) or {})
+            form_rows = []
+            for label in ["adv", "adj", "n"]:
+                item = word_forms[label]
+                if item.get("word"):
+                    form_rows.append((label, item.get("word", ""), item.get("meaning", "")))
+            for item in word_forms["related"]:
+                if item.get("word"):
+                    form_rows.append(("rel", item.get("word", ""), item.get("meaning", "")))
+            if form_rows:
+                with st.expander("▦", expanded=False):
+                    word_forms_component(form_rows, f"forms_{idx}")
